@@ -36,11 +36,31 @@ restored from SQLite snapshots) against the SAME current second ``t``:
   reported;
 * if ``t`` is earlier than ANY reported actual take-off on EITHER side the
   whole review is rejected - no difference is returned.
+
+A *temporary work-zone start window* (:func:`evaluate_work_window`) adds a
+vertical circular protected cylinder (centre, positive radius, lower/upper
+heights) and a deadline ``T`` plus a positive integer work duration ``d``.
+From the same restored (reported / planned) schedule it computes, for every
+participating sortie, the continuous-time closed intervals in which its
+piecewise-linear track lies inside the closed cylinder (lateral surface, top
+and bottom caps and waypoint instants all count), then keeps the integer start
+seconds ``s in [t, T-d]`` whose closed work interval ``[s, s+d]`` does not
+intersect ANY occupancy interval - not even at one endpoint instant; no
+per-second sampling is used.  Overdue sorties make the result unconfirmable
+and no safe starts are returned; ``t`` earlier than a reported actual take-off
+rejects the whole query.
 """
 
 from __future__ import annotations
 
-from .geometry import EPS, conflicts_between_sorties
+import math
+
+from .geometry import (
+    EPS,
+    conflicts_between_sorties,
+    cylinder_intersection_intervals,
+    merge_intervals,
+)
 
 REPORTED = "reported"
 PLANNED = "planned"
@@ -429,4 +449,208 @@ def review_warning(sorties, planned_offsets: dict[str, int],
         "sortie_changes": sortie_changes,
         "warning_before": w_before,
         "warning_after": w_after,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Temporary work-zone start window
+# ---------------------------------------------------------------------------
+
+
+#: Float boundary slivers smaller than this (seconds) are treated as exact
+#: boundary instants when lifting real occupancy onto integer seconds.
+_SAFE_EPS = 1e-7
+
+
+class WorkWindowReject(Exception):
+    """Raised when ``t`` is earlier than a reported actual take-off."""
+
+    def __init__(self, t: int, violations: list[dict]):
+        self.t = t
+        self.violations = violations
+        super().__init__(f"t={t} is earlier than a reported actual take-off")
+
+
+def _integer_forbidden_from_real(lo: float, hi: float) -> tuple[int, int] | None:
+    """Integers ``s`` with ``s`` inside the CLOSED interval ``[lo, hi]``.
+
+    Boundary-touching instants occupy, so both ends are treated as closed:
+    ``s`` is forbidden when ``s >= lo`` and ``s <= hi``.  Float jitter at an
+    exact integer is folded inward by ``_SAFE_EPS`` (safe side).
+    """
+    slo = int(math.ceil(lo - _SAFE_EPS))
+    shi = int(math.floor(hi + _SAFE_EPS))
+    return (slo, shi) if slo <= shi else None
+
+
+def _clip_integer_intervals(intervals: list[tuple[int, int]],
+                            lo: int, hi: int) -> list[tuple[int, int]]:
+    """Intersect a merged integer-interval union with closed ``[lo, hi]``."""
+    out = []
+    for a, b in intervals:
+        a2, b2 = max(a, lo), min(b, hi)
+        if a2 <= b2:
+            out.append((a2, b2))
+    return out
+
+
+def _subtract_integer_intervals(
+    base: tuple[int, int], blocked: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """Parts of the single closed integer interval ``base`` not covered by
+    the merged closed integer intervals ``blocked``."""
+    lo, hi = base
+    out: list[tuple[int, int]] = []
+    cur = lo
+    for a, b in blocked:
+        if b < cur or a > hi:
+            continue
+        if a > cur:
+            out.append((cur, min(a - 1, hi)))
+        cur = max(cur, b + 1)
+        if cur > hi:
+            break
+    if cur <= hi:
+        out.append((cur, hi))
+    return out
+
+
+def evaluate_work_window(sorties, planned_offsets: dict[str, int],
+                         reports: dict[str, Report], t: int, T: int, d: int,
+                         cx: float, cy: float, radius: float,
+                         z_lo: float, z_hi: float) -> dict:
+    """Safe integer-second work start instants inside ``[t, T - d]``.
+
+    The service restores trajectories from the frozen batch and the latest
+    reports exactly like the warning: reported sorties fly at their reported
+    actual take-off; unreported sorties whose planned take-off is not earlier
+    than ``t`` fly at the planned time; the rest are *overdue*.  When any
+    sortie is overdue the prediction cannot be confirmed: ``confirmable`` is
+    false and no safe starts are provided.  When ``t`` precedes any reported
+    actual take-off, :class:`WorkWindowReject` rejects the whole query.
+
+    Occupancy is the continuous-time union (over every participating sortie)
+    of the closed time intervals in which its piecewise-linear track lies
+    inside the closed cylinder.  A candidate integer second ``s`` is unsafe
+    when the closed work interval ``[s, s + d]`` intersects occupancy in even
+    a single instant - touching the cylinder surface, a waypoint instant, or a
+    work start/end instant all count as occupied; no per-second sampling is
+    used.
+
+    Returns a JSON-style dict with the safe integer intervals and the earliest
+    safe start (both empty when nothing is confirmable or safe).
+    """
+    violations = _reported_violations(reports, t)
+    if violations:
+        raise WorkWindowReject(t, violations)
+
+    statuses: dict[str, str] = {}
+    effective: dict[str, int] = {}
+    for s in sorties:
+        rep = reports.get(s.id)
+        if rep is not None:
+            statuses[s.id] = REPORTED
+            effective[s.id] = rep.actual_offset
+        elif planned_offsets[s.id] >= t:
+            statuses[s.id] = PLANNED
+            effective[s.id] = planned_offsets[s.id]
+        else:
+            statuses[s.id] = OVERDUE
+
+    overdue_ids = sorted(sid for sid, st in statuses.items() if st == OVERDUE)
+    candidate_lo, candidate_hi = t, T - d
+
+    sortie_rows = []
+    for s in sorties:
+        sid = s.id
+        status = statuses[sid]
+        rep = reports.get(sid)
+        planned = planned_offsets[sid]
+        sortie_rows.append({
+            "id": sid,
+            "status": status,
+            "planned_offset": planned,
+            "actual_offset": rep.actual_offset if rep is not None else None,
+            "revision": rep.revision if rep is not None else None,
+            "takeoff_offset": effective.get(sid),
+        })
+
+    base_dto = {
+        "t": t, "deadline": T, "duration": d,
+        "candidate_window": [candidate_lo, candidate_hi],
+        "zone": {"cx": cx, "cy": cy, "radius": radius,
+                 "z_lo": z_lo, "z_hi": z_hi},
+        "confirmable": False,
+        "incomplete": bool(overdue_ids),
+        "overdue_sorties": overdue_ids,
+        "sorties": sortie_rows,
+        "safe_intervals": [],
+        "earliest_safe_start": None,
+        "forbidden_intervals": [],
+        "occupancy": [],
+    }
+    if overdue_ids:
+        # Overdue sorties are excluded from prediction, so their occupancy is
+        # unknowable: never hand out safe starts for an unconfirmable window.
+        return base_dto
+
+    # No candidate second at all (t + d > T): an empty window, still complete.
+    if candidate_lo > candidate_hi:
+        base_dto["confirmable"] = True
+        base_dto["incomplete"] = False
+        return base_dto
+
+    # Continuous closed occupancy intervals of each participating sortie,
+    # restricted to the horizon that can touch a work window starting in
+    # [t, T-d] (work ends at T at the latest).
+    occupancy_rows: list[dict] = []
+    blocked_real: list[tuple[float, float]] = []
+    for s in sorties:
+        takeoff = effective[s.id]
+        ivs = cylinder_intersection_intervals(
+            s, takeoff, cx, cy, radius, z_lo, z_hi)
+        clipped: list[tuple[float, float]] = []
+        for a, b in ivs:
+            if b < t - EPS or a > T + EPS:
+                continue
+            clipped.append((max(float(t), a), min(float(T), b)))
+        clipped = merge_real_intervals(clipped)
+        if not clipped:
+            continue
+        row = {
+            "sortie_id": s.id,
+            "status": statuses[s.id],
+            "takeoff_offset": takeoff,
+            "intervals": [
+                {"time_start": round(a, 6), "time_end": round(b, 6)}
+                for a, b in clipped
+            ],
+        }
+        occupancy_rows.append(row)
+        blocked_real.extend(clipped)
+    occupancy_rows.sort(key=lambda r: (r["sortie_id"],))
+    occupancy_union = merge_real_intervals(blocked_real)
+
+    # Lift each closed occupancy interval [a, b] onto the integer starts whose
+    # closed work window [s, s+d] intersects it:  s in [a - d, b].
+    blocked_int: list[tuple[int, int]] = []
+    forbidden_view: list[tuple[int, int]] = []
+    for a, b in occupancy_union:
+        iv = _integer_forbidden_from_real(a - d, b)
+        if iv is not None:
+            blocked_int.append(iv)
+    blocked_int = merge_intervals(blocked_int)
+    forbidden_view = _clip_integer_intervals(blocked_int,
+                                             candidate_lo, candidate_hi)
+    safe = _subtract_integer_intervals((candidate_lo, candidate_hi),
+                                       blocked_int)
+
+    return {
+        **base_dto,
+        "confirmable": True,
+        "incomplete": False,
+        "occupancy": occupancy_rows,
+        "forbidden_intervals": [[a, b] for a, b in forbidden_view],
+        "safe_intervals": [[a, b] for a, b in safe],
+        "earliest_safe_start": safe[0][0] if safe else None,
     }

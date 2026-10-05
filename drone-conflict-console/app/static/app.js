@@ -24,6 +24,7 @@ const state = {
   warningSorties: {},    // latest warning rows keyed by sortie id
   reviewNodes: [],       // accepted report nodes (incl. baseline) for the open batch
   review: null,          // last warning-change review result
+  workWindow: null,      // last temporary work-zone start-window result
 };
 
 const $ = (id) => document.getElementById(id);
@@ -84,6 +85,7 @@ function loadScenarioDto(dto) {
   state.warningSorties = {};
   state.review = null;
   state.reviewNodes = [];
+  state.workWindow = null;
   state.sorties.forEach((s) => colorFor(s.id));
   $("safetyRadius").value = dto.safety_radius;
   $("safetyHeight").value = dto.safety_height;
@@ -696,8 +698,10 @@ async function openBatch(bid) {
     state.warning = null;
     state.warningSorties = {};
     state.review = null;
+    state.workWindow = null;
     renderBatchList();
     renderBatchDetail();
+    renderWorkWindow();
     await fetchReviewNodes();
   } catch (e) {
     toast("载入批次失败：" + e.message);
@@ -724,6 +728,7 @@ async function deleteBatch(bid) {
     state.warningSorties = {};
     state.review = null;
     state.reviewNodes = [];
+    state.workWindow = null;
   }
   toast("批次已删除");
   await fetchBatches();
@@ -984,6 +989,88 @@ async function evaluateReview() {
 }
 
 // ---------------------------------------------------------------------------
+// Temporary work-zone start window
+// ---------------------------------------------------------------------------
+
+async function evaluateWorkWindow() {
+  if (!state.batch) return;
+  const t = parseInt($("wwT").value, 10);
+  const T = parseInt($("wwDeadline").value, 10);
+  const d = parseInt($("wwDur").value, 10);
+  const cx = parseFloat($("wwCx").value);
+  const cy = parseFloat($("wwCy").value);
+  const r = parseFloat($("wwR").value);
+  const zLo = parseFloat($("wwZlo").value);
+  const zHi = parseFloat($("wwZhi").value);
+  if (!Number.isInteger(t) || t < 0) { toast("t 必须是非负整数秒"); return; }
+  if (!Number.isInteger(T)) { toast("T 必须是整数秒"); return; }
+  if (!Number.isInteger(d) || d <= 0) { toast("d 必须是正整数秒"); return; }
+  if (T < t) { toast("非法参数：T 不能早于 t"); return; }
+  if (![cx, cy, r, zLo, zHi].every(Number.isFinite)) { toast("保护区参数必须是有限数值"); return; }
+  if (!(r > 0)) { toast("半径必须为正数"); return; }
+  if (!(zLo < zHi)) { toast("下界高度必须严格小于上界高度"); return; }
+  const qs = new URLSearchParams({
+    t: String(t), T: String(T), d: String(d),
+    cx: String(cx), cy: String(cy), radius: String(r),
+    z_lo: String(zLo), z_hi: String(zHi),
+  });
+  try {
+    const res = await fetch(`/api/batches/${state.batch.batch_id}/work-window?${qs}`);
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const j = await res.json();
+        detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      } catch (_) {}
+      throw new Error(detail);
+    }
+    const data = await res.json();
+    state.workWindow = data.work_window;
+  } catch (e) {
+    state.workWindow = null;
+    renderWorkWindow();
+    toast("开工窗口查询被拒绝：" + e.message, 4200);
+    return;
+  }
+  renderWorkWindow();
+}
+
+function fmtIntervals(list) {
+  if (!list.length) return "∅（空）";
+  return list.map(([a, b]) => (a === b ? `${a}` : `[${a}, ${b}]`)).join("，");
+}
+
+function renderWorkWindow() {
+  const box = $("workWindowBox");
+  if (!box) return;
+  const ww = state.workWindow;
+  if (!ww) { box.innerHTML = ""; return; }
+  let head;
+  if (!ww.confirmable) {
+    head = `<div class="ww-bad">⚠️ 不可确认：${escapeHtml((ww.overdue_sorties || []).join("、"))} 已逾期并排除预测，
+      不提供安全开工起点。</div>`;
+  } else if (ww.earliest_safe_start === null) {
+    head = `<div class="ww-bad">✅ 预测完整，但候选区间内确无安全开工起点（安全区间为空，最早起点为空）。</div>`;
+  } else {
+    head = `<div class="ww-ok">✅ 可确认；最早安全开工起点：<b>${ww.earliest_safe_start}</b> s</div>`;
+  }
+  const meta = `<div class="hint" style="margin:4px 0">
+      候选开工秒区间 [t, T−d] = [${ww.candidate_window[0]}, ${ww.candidate_window[1]}]；
+      安全整数秒区间：<b>${fmtIntervals(ww.safe_intervals)}</b>；
+      被占用起点区间：${fmtIntervals(ww.forbidden_intervals)}</div>`;
+  const occ = (ww.occupancy || []);
+  const occHtml = occ.length
+    ? `<div class="wc-title">航迹对圆柱的连续时间占用（闭区间，触及边界也算）</div>` +
+      occ.map((o) => {
+        const ivs = o.intervals.map((x) =>
+          `<span class="ww-occ">${escapeHtml(x.time_start)} – ${escapeHtml(x.time_end)} s</span>`).join("");
+        return `<div class="wc-line">${escapeHtml(o.sortie_id)}（${statusLabel(o.status)}，起飞 ${o.takeoff_offset}s）：${ivs}</div>`;
+      }).join("")
+    : `<div class="wc-none">该时间范围内无航迹进入圆柱保护区。</div>`;
+  box.innerHTML = head + meta + occHtml;
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -1030,6 +1117,7 @@ $("closeResult").addEventListener("click", () => $("resultPanel").classList.add(
 $("createBatchBtn").addEventListener("click", createBatch);
 $("evalWarnBtn").addEventListener("click", evaluateWarning);
 $("reviewBtn").addEventListener("click", evaluateReview);
+$("evalWorkWindowBtn").addEventListener("click", evaluateWorkWindow);
 $("warnT").addEventListener("keydown", (e) => { if (e.key === "Enter") evaluateWarning(); });
 $("batchDel").addEventListener("click", () => {
   if (state.batch) deleteBatch(state.batch.batch_id);

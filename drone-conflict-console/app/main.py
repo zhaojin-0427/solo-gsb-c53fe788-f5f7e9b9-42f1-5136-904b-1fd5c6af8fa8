@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -25,7 +26,14 @@ from .solver import (
     run_solve,
     scan_schedule,
 )
-from .batch import EarlyTimeReject, Report, evaluate_warning, review_warning
+from .batch import (
+    EarlyTimeReject,
+    Report,
+    WorkWindowReject,
+    evaluate_warning,
+    evaluate_work_window,
+    review_warning,
+)
 from .storage import Store
 
 DB_PATH = os.environ.get("DCC_DB_PATH", "data/console.db")
@@ -325,6 +333,51 @@ def batch_warning(bid: int, t: int):
         )
     summary = _batch_summary(row)
     return {**summary, "warning": result}
+
+
+@app.get("/api/batches/{bid}/work-window")
+def batch_work_window(
+    bid: int,
+    t: int = Query(..., description="current second (non-negative integer)"),
+    T: int = Query(..., description="deadline second (integer, T >= t)"),
+    d: int = Query(..., description="work duration in seconds (positive integer)"),
+    cx: float = Query(..., description="protected cylinder centre x (metres)"),
+    cy: float = Query(..., description="protected cylinder centre y (metres)"),
+    radius: float = Query(..., description="protected cylinder radius (positive metres)"),
+    z_lo: float = Query(..., description="cylinder lower height (metres)"),
+    z_hi: float = Query(..., description="cylinder upper height (metres, > z_lo)"),
+):
+    row = store.get_batch(bid)
+    if row is None:
+        raise HTTPException(404, "batch not found")
+    if t < 0:
+        raise HTTPException(400, "t must be a non-negative integer second")
+    if d <= 0:
+        raise HTTPException(400, "d must be a positive integer duration")
+    if radius <= 0:
+        raise HTTPException(400, "cylinder radius must be positive")
+    if not z_lo < z_hi:
+        raise HTTPException(400, "cylinder heights must satisfy z_lo < z_hi")
+    for name, value in (("cx", cx), ("cy", cy), ("radius", radius),
+                        ("z_lo", z_lo), ("z_hi", z_hi)):
+        if not math.isfinite(value):
+            raise HTTPException(400, f"{name} must be a finite number")
+    if T < t:
+        raise HTTPException(400, detail={
+            "reason": "deadline_before_t", "t": t, "deadline": T})
+    sorties, reports = _build_batch(row)
+    try:
+        result = evaluate_work_window(
+            sorties, row["plan"]["offsets"], reports, t, T, d,
+            cx, cy, radius, z_lo, z_hi)
+    except WorkWindowReject as exc:
+        raise HTTPException(400, detail={
+            "reason": "t_before_reported_takeoff",
+            "t": t,
+            "violations": exc.violations,
+        })
+    summary = _batch_summary(row)
+    return {**summary, "work_window": result}
 
 
 def _reports_from_snapshot(snapshot: list[dict]) -> dict[str, Report]:

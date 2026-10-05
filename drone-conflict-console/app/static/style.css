@@ -225,6 +225,32 @@ canvas {
 }
 .rv-chip.changed { border-color: var(--accent); color: var(--text); }
 
+/* temporary work-zone start window */
+.ww-block {
+  margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px;
+}
+.ww-block .rv-title { margin-bottom: 4px; }
+.ww-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; margin-top: 6px;
+}
+.ww-grid label {
+  display: flex; flex-direction: column; gap: 3px;
+  color: var(--muted); font-size: 11px;
+}
+.ww-grid input {
+  background: #0e1525; color: var(--text);
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px;
+  font-size: 12px;
+}
+.work-window-box { font-size: 12px; margin-top: 6px; }
+.work-window-box .ww-ok { color: var(--ok); font-weight: 600; }
+.work-window-box .ww-bad { color: var(--bad); font-weight: 600; }
+.work-window-box .ww-occ {
+  display: inline-block; margin: 1px 4px 1px 0; padding: 0 6px;
+  background: #0e1525; border: 1px solid var(--line); border-radius: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 980px) {
   .layout { grid-template-columns: 1fr; }
 }

@@ -670,3 +670,112 @@ def _merge_records(records: list[ConflictRecord]) -> list[ConflictRecord]:
         else:
             out.append(rec)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Cylinder occupancy of one concretely-scheduled sortie (continuous time)
+# ---------------------------------------------------------------------------
+
+
+def cylinder_intersection_intervals(
+    sortie,
+    takeoff: float,
+    cx: float,
+    cy: float,
+    radius: float,
+    z_lo: float,
+    z_hi: float,
+) -> list[tuple[float, float]]:
+    """Global-time closed intervals during which the sortie is inside a
+    vertical circular cylinder (a temporary protected work zone).
+
+    The cylinder is ``{(x, y, z): (x-cx)^2 + (y-cy)^2 <= radius^2,
+    z_lo <= z <= z_hi}``; every boundary (lateral surface, top/bottom caps and
+    every waypoint instant) counts as occupied.  The trajectory is piecewise
+    linear, so along one segment parameter ``q in [0, duration]`` both the
+    vertical slab membership and the horizontal disk membership are found
+    analytically - no per-second sampling - and intersected as closed sets.
+
+    Returns merged global-clock intervals ``[time_start, time_end]`` (a
+    degenerate ``[T, T]`` interval means the trajectory only touches the
+    cylinder at one instant, e.g. grazing the lateral surface or reaching a
+    cap at a waypoint).
+    """
+    r2 = radius * radius
+    intervals: list[tuple[float, float]] = []
+
+    for seg in sortie.segments:
+        a0 = seg.t0 + takeoff
+        a1 = seg.t1 + takeoff
+        L = seg.t1 - seg.t0  # > 0 (waypoint times are strictly increasing)
+
+        # Position along the segment: P(q) = p0 + v*q, q in [0, L] (q is the
+        # local flight time; global time is takeoff + seg.t0 + q).
+        dx0 = seg.p0[0] - cx
+        dy0 = seg.p0[1] - cy
+        vx, vy = seg.v[0], seg.v[1]
+        z0 = seg.p0[2]
+        vz = seg.v[2]
+
+        # --- closed vertical slab q-set: z_lo <= z0 + vz*q <= z_hi ----------
+        v_lo, v_hi = 0.0, L
+        if abs(vz) > 1e-14:
+            for bound, is_upper in ((z_lo, False), (z_hi, True)):
+                qb = (bound - z0) / vz
+                if vz > 0:
+                    if is_upper:
+                        v_hi = min(v_hi, qb)
+                    else:
+                        v_lo = max(v_lo, qb)
+                else:
+                    if is_upper:
+                        v_lo = max(v_lo, qb)
+                    else:
+                        v_hi = min(v_hi, qb)
+        elif not (z_lo - EPS <= z0 <= z_hi + EPS):
+            continue
+        if v_lo > v_hi + EPS:
+            continue
+        v_lo = min(L, max(0.0, v_lo))
+        v_hi = min(L, max(0.0, v_hi))
+
+        # --- closed horizontal disk q-set: (dx0+vx*q)^2+(dy0+vy*q)^2 <= r2 --
+        a = vx * vx + vy * vy
+        b = 2 * (dx0 * vx + dy0 * vy)
+        c = dx0 * dx0 + dy0 * dy0
+        h_parts: list[tuple[float, float]] = []
+        if a > 1e-14:
+            roots = _quadratic_roots(a, b, c - r2)
+            if len(roots) == 2:
+                rl, rh = min(roots), max(roots)
+                h_parts.append((rl, rh))
+            elif len(roots) == 1 and abs(c - r2) <= EPS:
+                h_parts.append((roots[0], roots[0]))
+        else:
+            # Horizontally stationary on this segment: either the whole
+            # segment is inside the disk (boundary included) or none of it.
+            if c <= r2 + EPS:
+                h_parts.append((0.0, L))
+
+        for hl, hh in h_parts:
+            lo = max(v_lo, hl, 0.0)
+            hi = min(v_hi, hh, L)
+            if lo <= hi + EPS:
+                lo = min(L, max(0.0, lo))
+                hi = min(L, max(0.0, hi))
+                intervals.append((takeoff + seg.t0 + lo, takeoff + seg.t0 + hi))
+
+    return merge_real_intervals_global(intervals)
+
+
+def merge_real_intervals_global(intervals: list[tuple[float, float]]
+                                ) -> list[tuple[float, float]]:
+    """Union of closed global-time intervals, merging overlaps/touches."""
+    ivs = sorted((float(a), float(b)) for a, b in intervals if b >= a - EPS)
+    merged: list[list[float]] = []
+    for a, b in ivs:
+        if merged and a <= merged[-1][1] + 1e-9:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [(a, b) for a, b in merged]

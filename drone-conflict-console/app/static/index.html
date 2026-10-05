@@ -87,6 +87,27 @@
         <div id="warnSorties" class="warn-sorties"></div>
         <div id="warnConflicts" class="warn-conflicts"></div>
 
+        <div class="ww-block">
+          <div class="rv-title">临时作业区开工窗口</div>
+          <div class="hint">输入竖直圆柱保护区（水平中心 / 正半径 / 下、上高度）与当前秒 t、截止秒 T、作业时长 d（正整数秒）；查询 [t, T−d] 内作业闭区间 [s, s+d] 不与任何可预测航迹连续时间相交的整数秒开工起点。触及圆柱边界、航点或作业起止时刻均算占用；逾期架次存在时不可确认。</div>
+          <div class="ww-grid">
+            <label>中心 x (m)<input id="wwCx" type="number" step="any" value="100" /></label>
+            <label>中心 y (m)<input id="wwCy" type="number" step="any" value="0" /></label>
+            <label>半径 (m)<input id="wwR" type="number" min="0.1" step="any" value="10" /></label>
+            <label>下高度 (m)<input id="wwZlo" type="number" step="any" value="15" /></label>
+            <label>上高度 (m)<input id="wwZhi" type="number" step="any" value="25" /></label>
+            <label>当前秒 t<input id="wwT" type="number" min="0" step="1" value="0" /></label>
+            <label>截止秒 T<input id="wwDeadline" type="number" step="1" value="30" /></label>
+            <label>作业时长 d (s)<input id="wwDur" type="number" min="1" step="1" value="4" /></label>
+          </div>
+          <div class="row" style="margin:6px 0">
+            <div class="t-row">
+              <button id="evalWorkWindowBtn">查询开工窗口</button>
+            </div>
+          </div>
+          <div id="workWindowBox" class="work-window-box"></div>
+        </div>
+
         <div class="rv-block">
           <div class="rv-title">预警变更复盘</div>
           <div class="hint">选择一次已接受的上报节点，用与预警相同的当前秒 t，复盘该上报前后的预警变化。同号同值重试与被拒绝的旧号不生成节点。</div>

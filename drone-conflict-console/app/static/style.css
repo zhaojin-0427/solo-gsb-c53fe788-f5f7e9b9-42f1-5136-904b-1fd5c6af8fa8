@@ -225,6 +225,26 @@ canvas {
 }
 .rv-chip.changed { border-color: var(--accent); color: var(--text); }
 
+/* temporary work-zone start window */
+.wz-block {
+  margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px;
+}
+.wz-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px;
+  margin: 6px 0;
+}
+.wz-grid label { color: var(--muted); font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
+.wz-grid input {
+  background: #0e1525; color: var(--text);
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px;
+}
+.wz-box { font-size: 12px; display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.wz-ok { color: var(--ok); font-weight: 600; }
+.wz-bad { color: var(--bad); font-weight: 600; }
+.wz-ok2 b { color: var(--ok); font-size: 14px; }
+.wz-safe { font-variant-numeric: tabular-nums; }
+.wz-note { color: var(--muted); font-size: 12px; }
+
 @media (max-width: 980px) {
   .layout { grid-template-columns: 1fr; }
 }

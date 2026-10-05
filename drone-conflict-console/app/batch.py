@@ -190,22 +190,24 @@ def _reported_violations(reports: dict[str, Report], t: int) -> list[dict]:
     ]
 
 
-def _evaluate(sorties, planned_offsets: dict[str, int],
-              reports: dict[str, Report], safety_radius: float,
-              safety_height: float, t: int):
-    """Core evaluation.
+def classify_sorties(sorties, planned_offsets: dict[str, int],
+                     reports: dict[str, Report], t: int
+                     ) -> tuple[dict[str, str], dict[str, int]]:
+    """Classify every sortie at current second ``t`` and resolve take-offs.
 
-    Returns ``(warning_dto, raw_conflicts, statuses, effective)`` where
-    ``raw_conflicts`` holds unrounded ``(record, takeoff_a, takeoff_b)``
-    triples restricted to instants ``>= t`` (for interval diffing).
+    Returns ``(statuses, effective)`` where ``statuses`` maps a sortie id to
+    reported / planned / overdue and ``effective`` maps the *participating*
+    (non-overdue) sorties to their effective take-off offset.  Raises
+    :class:`EarlyTimeReject` when ``t`` precedes a reported actual take-off.
 
-    Raises :class:`EarlyTimeReject` when ``t`` precedes a reported take-off.
+    A planned take-off exactly at ``t`` still counts as predictable
+    (``planned_offset >= t``); an unreported sortie whose planned take-off is
+    strictly earlier than ``t`` is overdue.
     """
     violations = _reported_violations(reports, t)
     if violations:
         raise EarlyTimeReject(t, violations)
 
-    by_id = {s.id: s for s in sorties}
     statuses: dict[str, str] = {}
     effective: dict[str, int] = {}
     for s in sorties:
@@ -218,28 +220,14 @@ def _evaluate(sorties, planned_offsets: dict[str, int],
             effective[s.id] = planned_offsets[s.id]
         else:
             statuses[s.id] = OVERDUE
+    return statuses, effective
 
-    # Continuous-time conflicts on the effective schedule, restricted to the
-    # participating (non-overdue) sorties and to instants at or after t.
-    raw_conflicts: list[tuple] = []
-    conflicts: list[dict] = []
-    for i, sa in enumerate(sorties):
-        if statuses[sa.id] == OVERDUE:
-            continue
-        for sb in sorties[i + 1:]:
-            if statuses[sb.id] == OVERDUE:
-                continue
-            eff_a, eff_b = effective[sa.id], effective[sb.id]
-            recs = conflicts_between_sorties(
-                sa, eff_a, sb, eff_b, safety_radius, safety_height)
-            for rec in recs:
-                if rec.time_end < t - EPS:
-                    continue
-                raw_conflicts.append((rec, eff_a, eff_b))
-                conflicts.append(_conflict_dto(by_id, eff_a, eff_b, rec, t))
-    conflicts.sort(key=lambda r: (r["time_start"], r["sortie_a"], r["sortie_b"]))
-    first_conflict_time = conflicts[0]["time_start"] if conflicts else None
 
+def build_sortie_rows(sorties, planned_offsets: dict[str, int],
+                      reports: dict[str, Report],
+                      statuses: dict[str, str],
+                      effective: dict[str, int]) -> tuple[list[dict], list[dict]]:
+    """Per-sortie status rows plus a compact reported-deviation list."""
     sortie_rows = []
     deviations = []
     for s in sorties:
@@ -267,6 +255,46 @@ def _evaluate(sorties, planned_offsets: dict[str, int],
                 "deviation_seconds": deviation,
             })
         sortie_rows.append(row)
+    return sortie_rows, deviations
+
+
+def _evaluate(sorties, planned_offsets: dict[str, int],
+              reports: dict[str, Report], safety_radius: float,
+              safety_height: float, t: int):
+    """Core evaluation.
+
+    Returns ``(warning_dto, raw_conflicts, statuses, effective)`` where
+    ``raw_conflicts`` holds unrounded ``(record, takeoff_a, takeoff_b)``
+    triples restricted to instants ``>= t`` (for interval diffing).
+
+    Raises :class:`EarlyTimeReject` when ``t`` precedes a reported take-off.
+    """
+    statuses, effective = classify_sorties(sorties, planned_offsets, reports, t)
+
+    by_id = {s.id: s for s in sorties}
+    # Continuous-time conflicts on the effective schedule, restricted to the
+    # participating (non-overdue) sorties and to instants at or after t.
+    raw_conflicts: list[tuple] = []
+    conflicts: list[dict] = []
+    for i, sa in enumerate(sorties):
+        if statuses[sa.id] == OVERDUE:
+            continue
+        for sb in sorties[i + 1:]:
+            if statuses[sb.id] == OVERDUE:
+                continue
+            eff_a, eff_b = effective[sa.id], effective[sb.id]
+            recs = conflicts_between_sorties(
+                sa, eff_a, sb, eff_b, safety_radius, safety_height)
+            for rec in recs:
+                if rec.time_end < t - EPS:
+                    continue
+                raw_conflicts.append((rec, eff_a, eff_b))
+                conflicts.append(_conflict_dto(by_id, eff_a, eff_b, rec, t))
+    conflicts.sort(key=lambda r: (r["time_start"], r["sortie_a"], r["sortie_b"]))
+    first_conflict_time = conflicts[0]["time_start"] if conflicts else None
+
+    sortie_rows, deviations = build_sortie_rows(
+        sorties, planned_offsets, reports, statuses, effective)
 
     overdue_ids = [row["id"] for row in sortie_rows if row["status"] == OVERDUE]
     dto = {

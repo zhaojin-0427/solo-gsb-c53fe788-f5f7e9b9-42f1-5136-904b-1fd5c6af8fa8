@@ -49,6 +49,18 @@
   状态变化。节点与上报写入在**同一个 `BEGIN IMMEDIATE` 事务**内提交，因此跨进程
   共库时“上报写入 ↔ 复盘节点”严格原子、节点顺序就是实际提交顺序；既有批次升级时
   只补一个以**当时可知的最新状态**为内容的基线节点，不补造更早历史。
+- **临时作业区开工窗口**：在执行批次中指定一个**竖直圆柱保护区**（水平中心
+  `(cx, cy)`、正半径 `r`、上下高度 `z_lo < z_hi`）、非负整数当前秒 `t`、整数
+  截止秒 `T` 与正整数作业时长 `d`，系统从 **SQLite 冻结批次与最新上报**还原
+  航迹（已上报按实际起飞；未上报且计划起飞不早于 `t` 的按计划；逾期则结果
+  **不可确认且不提供安全起点**；`t` 早于任一已上报实际起飞则整次拒绝），在
+  **连续时间**上计算每架次分段直线与圆柱相交的占用区间（触及圆柱侧壁/上下平面、
+  恰好位于航点时刻、作业闭区间 `[s, s+d]` 与占用只在端点相切都算占用，不做整秒
+  采样），排除所有与占用相交的开工秒，返回候选范围 `[t, T-d]` 内的**安全整数秒
+  开工起点区间与最早起点**；`T < t`、`d <= 0`、`r <= 0`、`z_lo >= z_hi` 等
+  非法参数拒绝；没有候选秒或确无安全起点时区间为空、最早起点为 `null`。修订
+  上报后重查、批次重载后重查结果完全一致；批次页与 HTTP API 随
+  `docker compose up` 一键启动即可访问。
 - **可视化对照**：
   - 水平航迹图（最早起飞虚线 / 求解后实线，冲突见证点用红色 ✕ 与安全圆标出）；
   - 甘特式时间轴（红色段为最早起飞时的冲突时间）；
@@ -64,11 +76,12 @@
 ```
 drone-conflict-console/
 ├── app/
-│   ├── main.py          # FastAPI 路由（含执行批次 / 上报 / 预警 API）
+│   ├── main.py          # FastAPI 路由（含执行批次 / 上报 / 预警 / 作业区开工窗口 API）
 │   ├── model.py         # 航迹/航段数据模型
 │   ├── geometry.py      # 连续冲突检测 + 互斥时差解析几何
 │   ├── solver.py        # OR-Tools CP-SAT 建模、字典序择优、无解核枚举
 │   ├── batch.py         # 批次预警纯逻辑：状态分类 + 连续时间冲突投影 + 复盘差分
+│   ├── workzone.py      # 临时作业区：连续时间圆柱占用 + 安全整数秒开工窗口
 │   ├── schemas.py       # 导入/求解/上报请求的校验
 │   ├── storage.py       # SQLite 持久化（场景、方案、批次、上报、复盘节点）
 │   └── static/          # 原生 JS + Canvas 前端（无构建步骤）
@@ -95,8 +108,14 @@ docker compose up --build
 启动后用浏览器访问：
 
 - **应用页面**：<http://localhost:8000/>
+- **批次页（含临时作业区开工窗口查询）**：<http://localhost:8000/>
+  → 打开任意执行批次（或先从可行方案创建批次），在批次详情的
+  **临时作业区开工窗口** 卡片填写圆柱参数、截止秒 `T` 与作业时长 `d`
+  （当前秒 `t` 沿用上方预警输入），点 **查询开工窗口**。
+- 作业区 HTTP API（批次 1 示例）：
+  `http://localhost:8000/api/batches/1/workzone?cx=120&cy=0&radius=30&z_lo=15&z_hi=25&t=0&T=30&d=4`
 - API 健康检查：<http://localhost:8000/api/health>
-- OpenAPI 文档（可选）：<http://localhost:8000/docs>
+- OpenAPI 文档（可选）：<http://localhost:8000/docs>（其中列出 `workzone` 接口）
 
 数据保存在 Docker 命名卷 `dcc-data`（容器内 `/data/console.db`），
 停止/重建容器不会丢失已保存方案。
@@ -185,6 +204,14 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
      逾期新增/解除、各架次状态变化，以及按架次对分组的“🔺 新增 / 🟢 解除”冲突
      时间段；前后区间相交时只显示真正不同的部分，仅一侧存在的瞬时冲突
      （`[t, t]` 孤立时刻）也会列为新增/解除。
+   - 在 **临时作业区开工窗口** 卡片填写圆柱水平中心 `(X, Y)`、正半径、
+     上下高度（下界严格小于上界）、截止秒 `T` 与正整数作业时长 `d`
+     （当前秒 `t` 沿用上方同一个输入），点 **查询开工窗口（用上方 t）**：
+     面板先给出航迹是否可确认（存在逾期架次则标“不可确认”且不提供安全
+     起点），再给出候选开工秒范围 `[t, T−d]`、**最早安全起点**、安全整数秒
+     开工起点区间、被占用排除的开工秒，以及每架次航迹在圆柱内的连续时间
+     占用区间（已裁剪到 `[t, T]`）。触及圆柱边界 / 航点 / 作业起止时刻均算
+     占用。上报修订后再次查询会即时刷新，与 HTTP API 结果一致。
 
 ---
 
@@ -259,6 +286,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `DELETE` | `/api/batches/{id}` | 删除批次及其上报 |
 | `PUT` | `/api/batches/{id}/reports` | 上报某架次实际起飞偏移与修订号（幂等/冲突，多进程共库也按数据库级规则裁决） |
 | `GET` | `/api/batches/{id}/warning?t=` | 在非负当前秒 `t` 评估偏差预警 |
+| `GET` | `/api/batches/{id}/workzone?cx=&cy=&radius=&z_lo=&z_hi=&t=&T=&d=` | 临时圆柱作业区：返回 `[t,T-d]` 内安全整数秒开工起点区间与最早起点 |
 | `GET` | `/api/batches/{id}/report-nodes` | 列出可复盘节点（基线 + 每次已接受的上报写入） |
 | `GET` | `/api/batches/{id}/report-nodes/{nid}/review?t=` | 用当前秒 `t` 复盘该节点前后的连续时间预警变化（未知节点/批次返回 404） |
 | `GET` | `/api/health` | 健康检查 |
@@ -632,6 +660,84 @@ curl -s "http://localhost:8000/api/batches/1/report-nodes/3/review?t=10"
 t_before_reported_takeoff`）。页面上打开该批次、在 **预警变更复盘** 选择对应
 节点并沿用同一 `t`，可看到同样的 “🔺 新增冲突 [10.0, 10.0] s”。
 
+### 7) 临时作业区开工窗口（连续时间圆柱占用）
+
+接着使用前面的**批次 1**（`crossroads`，计划 A=4/B=0/C=2/D=6，全新批次无上报）。
+在十字路口中心 `(120, 0)` 设一个半径 30 m、高度 15–25 m 的竖直圆柱保护区，
+当前秒 `t=0`、截止秒 `T=30`、作业时长 `d=4` 秒（作业闭区间 `[s, s+4]` 必须在
+`T=30` 前结束，因此候选开工秒为 `[0, 26]`）：
+
+```bash
+curl -s "http://localhost:8000/api/batches/1/workzone?cx=120&cy=0&radius=30&z_lo=15&z_hi=25&t=0&T=30&d=4"
+```
+
+响应（节选）给出各架次**在圆柱内的连续时间占用区间**、被占用排除的开工秒、
+**安全整数秒开工起点区间与最早起点**：
+
+```json
+{"workzone":{
+  "zone":{"center_x":120,"center_y":0,"radius":30,"z_lo":15,"z_hi":25},
+  "t":0,"T":30,"duration":4,
+  "candidate_window":{"start_lo":0,"start_hi":26,"has_candidates":true},
+  "confirmable":true,"incomplete":false,"overdue_sorties":[],
+  "occupancy":[
+    {"sortie_id":"UAV-A","status":"planned","takeoff_offset":4,
+     "occupied_intervals":[{"time_start":13.0,"time_end":19.0}]},
+    {"sortie_id":"UAV-B","status":"planned","takeoff_offset":0,
+     "occupied_intervals":[{"time_start":3.0,"time_end":9.0}]},
+    {"sortie_id":"UAV-C","status":"planned","takeoff_offset":2,
+     "occupied_intervals":[{"time_start":9.919874,"time_end":14.080126}]}],
+  "forbidden_start_intervals":[[-1,19]],
+  "safe_start_intervals":[[20,26]],
+  "earliest_safe_start":20}}
+```
+
+占用由分段直线与圆柱在**连续时间**上求交得到（同时满足水平距离 `≤ r` 且高度在
+`[z_lo, z_hi]` 内）：例如 B 在全局 3–9 s 位于圆柱内，任何 `[s, s+4]` 与 `[3,9]`
+相交的开工秒（`s ∈ [−1, 9]`）都被排除；三架次占用合并后覆盖到 19 s，故安全
+起点为 `[20, 26]`、最早 **20 s**。这些数值由冻结航迹与计划偏移解析确定，稳定
+可复现。边界规则：
+
+- **闭区间相切也算占用**：作业区间与占用只在端点相接（`s + d = 占用起点` 或
+  `s = 占用终点`）时该开工秒同样排除；航迹**触及圆柱侧壁或上下平面**、占用退化为
+  单个时刻（如擦边、恰在航点时刻进入）也计入；实现带极小容差，按保守（安全）侧
+  处理，**不按整秒采样**。
+- **占用裁剪到 `[t, T]`**：早于 `t` 或晚于 `T` 的占用不可能与 `[t, T−d]` 内开始
+  的作业相交，自动忽略。
+
+逾期与拒绝（与预警同一套状态规则）：
+
+```bash
+# 全新批次 t=3：B(计划0)、C(计划2) 已严格早于 t 且未上报 -> 逾期，
+# 结果不可确认且不提供任何安全起点
+curl -s "http://localhost:8000/api/batches/1/workzone?cx=120&cy=0&radius=30&z_lo=15&z_hi=25&t=3&T=30&d=4"
+# => {"workzone":{"confirmable":false,"incomplete":true,
+#                 "overdue_sorties":["UAV-B","UAV-C"],
+#                 "safe_start_intervals":[],"earliest_safe_start":null, ...}}
+
+# 对批次 2（B 已实际上报 4）在 t=4 查询：已上报按实际起飞、D 按计划(6>=4)，
+# 全部可确认；B 的占用随实际起飞平移到 [7,13]，合并占用仍到 19，
+# safe_start_intervals=[[20,26]]、earliest=20
+curl -s "http://localhost:8000/api/batches/2/workzone?cx=120&cy=0&radius=30&z_lo=15&z_hi=25&t=4&T=30&d=4"
+
+# t=3 早于 B 的已上报实际起飞 4 -> 整次拒绝（与预警一致）
+curl -i "http://localhost:8000/api/batches/2/workzone?cx=120&cy=0&radius=30&z_lo=15&z_hi=25&t=3&T=30&d=4"
+# HTTP/1.1 400 Bad Request
+# {"detail":{"reason":"t_before_reported_takeoff","t":3,
+#            "violations":[{"sortie_id":"UAV-B","actual_takeoff":4}]}}
+```
+
+非法参数一律 `400`（非整数的 `t/T/d` 由 FastAPI 校验为 `422`），原因码：
+`radius_not_positive`（`radius <= 0`）、`invalid_altitude_band`（`z_lo >= z_hi`）、
+`t_negative`、`duration_not_positive`（`d <= 0`）、`deadline_before_t`（`T < t`）；
+未知批次 `404`。当 `T - d < t` 时没有候选开工秒
+（`candidate_window.has_candidates=false`），安全区间为空、最早起点为 `null`；
+候选存在但每个开工秒都与占用相交时同样返回空区间与 `null`（确无安全起点）。
+对某架次再发更高修订号纠正实际起飞后重查、或重新 `GET /api/batches/{id}`
+重载批次后重查，结果逐字节一致；既有 `/warning` 与 `/report-nodes/.../review`
+响应不受影响。页面上在批次详情的 **临时作业区开工窗口** 卡片操作，结果与
+HTTP API 完全相同。
+
 ---
 
 ## 测试
@@ -643,6 +749,7 @@ pip install -r requirements.txt
 python tests/test_geometry_crossval.py     # 几何：解析法 vs 连续扫描 vs 密采样
 python tests/test_solver_bruteforce.py 2026  # 求解器：对照暴力枚举（含无解核极小性）
 python tests/test_batches_warning.py       # 批次：修订协议/多进程共库并发/预警分类与冲突/复盘节点与区间差分
+python tests/test_workzone_window.py       # 作业区：圆柱占用解析几何 vs 密采样/闭区间相切/逾期与拒绝/安全窗口
 ```
 
 - `test_geometry_crossval.py` 用三套相互独立的实现（多边形/椭圆柱解析、
@@ -658,6 +765,13 @@ python tests/test_batches_warning.py       # 批次：修订协议/多进程共�
   一致**，复盘差分为相交区间只标变化部分、**仅单侧存在的孤立时刻 `[t,t]`
   计入新增/解除而双方共有的时刻不误报**、前后首个冲突时刻、逾期新增/解除、
   任一侧未来起飞即整次拒绝，以及旧批次升级只补一个最新状态基线。
+- `test_workzone_window.py` 验证作业区查询的参数拒绝（`T < t`、非正半径/时长、
+  `z_lo >= z_hi`、负 `t`）、连续时间圆柱占用与**密采样神谕**一致（含爬升穿高度
+  带、转弯、擦边等随机航迹）、触及圆柱侧壁/航点端点产生点占用、**闭作业区间在
+  端点相切也排除开工秒**、亚秒级占用不被整秒采样漏掉、已上报/按计划/逾期分类与
+  **逾期即不可确认且不提供安全起点**、`t` 早于已上报实际起飞整次拒绝、候选为空
+  与确无安全起点均返回空区间/`null`、截止 `T` 裁剪，以及**修订纠正后重查与从
+  SQLite 重载后重查逐字节一致**、既有预警响应结构不变。
 
 ---
 
@@ -675,6 +789,12 @@ python tests/test_batches_warning.py       # 批次：修订协议/多进程共�
 - 预警的“计划起飞不早于 `t`”按 `计划偏移 >= t` 判定（恰在 `t` 起飞仍可预测）；
   逾期架次不参与任何冲突对，因此只要存在逾期架次 `incomplete=true`。已上报架次
   的偏离秒数 = 实际偏移 − 计划偏移（负为提前、正为延误）。
+- 临时作业区开工窗口沿用同样的状态分类与拒绝规则：占用在连续时间上对分段直线
+  与**闭圆柱**（水平距离 `≤ r` 且 `z_lo ≤ z ≤ z_hi`）求交，边界相切按安全侧
+  计入；开工秒 `s` 仅当闭作业区间 `[s, s+d]` 与任一占用时刻**完全不相交**时才
+  安全，候选范围为整数秒 `[t, T-d]`（`T-d < t` 即无候选）。逾期架次存在时
+  `confirmable=false` 且不返回安全起点；查询是冻结批次与已存上报的纯函数，
+  修订重查与重载结果一致。
 - 多个进程/副本可共用同一个 `DCC_DB_PATH` 指向的 SQLite 文件：数据库以 WAL 打开、
   设置了忙等待，上报用条件写入仲裁，并发修订不会回退（可用
   `docker compose --profile multiproc up` 起两个进程并运行

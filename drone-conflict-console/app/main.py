@@ -26,6 +26,7 @@ from .solver import (
     scan_schedule,
 )
 from .batch import EarlyTimeReject, Report, evaluate_warning, review_warning
+from .workzone import InvalidWorkZoneQuery, evaluate_workzone
 from .storage import Store
 
 DB_PATH = os.environ.get("DCC_DB_PATH", "data/console.db")
@@ -325,6 +326,33 @@ def batch_warning(bid: int, t: int):
         )
     summary = _batch_summary(row)
     return {**summary, "warning": result}
+
+
+@app.get("/api/batches/{bid}/workzone")
+def batch_workzone(bid: int, cx: float, cy: float, radius: float,
+                   z_lo: float, z_hi: float, t: int, T: int, d: int):
+    """Safe integer start window for a temporary cylindrical work zone."""
+    row = store.get_batch(bid)
+    if row is None:
+        raise HTTPException(404, "batch not found")
+    sorties, reports = _build_batch(row)
+    try:
+        result = evaluate_workzone(
+            sorties, row["plan"]["offsets"], reports,
+            cx, cy, radius, z_lo, z_hi, t, T, d)
+    except InvalidWorkZoneQuery as exc:
+        raise HTTPException(400, detail={"reason": exc.reason, **exc.fields})
+    except EarlyTimeReject as exc:
+        raise HTTPException(
+            400,
+            detail={
+                "reason": "t_before_reported_takeoff",
+                "t": t,
+                "violations": exc.violations,
+            },
+        )
+    summary = _batch_summary(row)
+    return {**summary, "workzone": result}
 
 
 def _reports_from_snapshot(snapshot: list[dict]) -> dict[str, Report]:

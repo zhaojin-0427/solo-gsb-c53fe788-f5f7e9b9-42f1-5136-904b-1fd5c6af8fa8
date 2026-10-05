@@ -87,6 +87,26 @@
         <div id="warnSorties" class="warn-sorties"></div>
         <div id="warnConflicts" class="warn-conflicts"></div>
 
+        <div class="wz-block">
+          <div class="rv-title">临时作业区开工窗口</div>
+          <div class="hint">输入竖直圆柱保护区（水平中心、正半径、上下高度）、截止秒 T 与正整数作业时长 d，沿用上方当前秒 t。服务从冻结批次与最新上报还原航迹，用连续时间几何计算 [t, T−d] 内不与航迹相交的整数秒开工起点区间及最早起点；触及圆柱边界、航点或作业起止时刻均算占用。逾期架次存在时不可确认且不提供安全起点。</div>
+          <div class="wz-grid">
+            <label>中心 X (m)<input id="wzCx" type="number" step="any" value="120" /></label>
+            <label>中心 Y (m)<input id="wzCy" type="number" step="any" value="0" /></label>
+            <label>半径 r (m)<input id="wzR" type="number" min="0.000001" step="any" value="30" /></label>
+            <label>高度下界 (m)<input id="wzZlo" type="number" step="any" value="15" /></label>
+            <label>高度上界 (m)<input id="wzZhi" type="number" step="any" value="25" /></label>
+            <label>截止秒 T<input id="wzT" type="number" step="1" value="30" /></label>
+            <label>作业时长 d (s)<input id="wzD" type="number" min="1" step="1" value="4" /></label>
+          </div>
+          <div class="row" style="margin:6px 0">
+            <div class="t-row">
+              <button id="evalWzBtn">查询开工窗口（用上方 t）</button>
+            </div>
+          </div>
+          <div id="wzBox" class="wz-box"></div>
+        </div>
+
         <div class="rv-block">
           <div class="rv-title">预警变更复盘</div>
           <div class="hint">选择一次已接受的上报节点，用与预警相同的当前秒 t，复盘该上报前后的预警变化。同号同值重试与被拒绝的旧号不生成节点。</div>

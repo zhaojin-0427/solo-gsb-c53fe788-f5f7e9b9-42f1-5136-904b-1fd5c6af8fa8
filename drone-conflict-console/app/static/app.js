@@ -24,6 +24,7 @@ const state = {
   warningSorties: {},    // latest warning rows keyed by sortie id
   reviewNodes: [],       // accepted report nodes (incl. baseline) for the open batch
   review: null,          // last warning-change review result
+  workzone: null,        // last temporary work-zone start-window result
 };
 
 const $ = (id) => document.getElementById(id);
@@ -84,6 +85,7 @@ function loadScenarioDto(dto) {
   state.warningSorties = {};
   state.review = null;
   state.reviewNodes = [];
+  state.workzone = null;
   state.sorties.forEach((s) => colorFor(s.id));
   $("safetyRadius").value = dto.safety_radius;
   $("safetyHeight").value = dto.safety_height;
@@ -696,8 +698,10 @@ async function openBatch(bid) {
     state.warning = null;
     state.warningSorties = {};
     state.review = null;
+    state.workzone = null;
     renderBatchList();
     renderBatchDetail();
+    renderWorkzone();
     await fetchReviewNodes();
   } catch (e) {
     toast("载入批次失败：" + e.message);
@@ -724,10 +728,12 @@ async function deleteBatch(bid) {
     state.warningSorties = {};
     state.review = null;
     state.reviewNodes = [];
+    state.workzone = null;
   }
   toast("批次已删除");
   await fetchBatches();
   renderBatchDetail();
+  renderWorkzone();
 }
 
 async function submitReport(sortieId) {
@@ -739,6 +745,7 @@ async function submitReport(sortieId) {
   }
   const revision = nextRevision(sortieId);
   const t = parseInt($("warnT").value, 10);
+  const hadWorkzoneQuery = state.workzone !== null;
   try {
     const r = await api(`/api/batches/${state.batch.batch_id}/reports`, {
       method: "PUT",
@@ -749,6 +756,7 @@ async function submitReport(sortieId) {
     if (Number.isInteger(t) && t >= 0) {
       $("warnT").value = t;
       await evaluateWarning();
+      if (hadWorkzoneQuery) await evaluateWorkzone(true);
     }
   } catch (e) {
     // Another process may have committed a higher revision concurrently:
@@ -984,6 +992,98 @@ async function evaluateReview() {
 }
 
 // ---------------------------------------------------------------------------
+// Temporary work-zone start window
+// ---------------------------------------------------------------------------
+
+function readWorkzoneParams() {
+  const t = parseInt($("warnT").value, 10);
+  const p = {
+    cx: parseFloat($("wzCx").value),
+    cy: parseFloat($("wzCy").value),
+    radius: parseFloat($("wzR").value),
+    z_lo: parseFloat($("wzZlo").value),
+    z_hi: parseFloat($("wzZhi").value),
+    T: parseInt($("wzT").value, 10),
+    d: parseInt($("wzD").value, 10),
+    t,
+  };
+  if (!Number.isInteger(t) || t < 0) { toast("t 必须是非负整数秒"); return null; }
+  if (!(p.radius > 0)) { toast("圆柱半径必须为正数"); return null; }
+  if (!(p.z_lo < p.z_hi)) { toast("高度下界必须严格小于上界"); return null; }
+  if (!Number.isInteger(p.T)) { toast("截止秒 T 必须是整数"); return null; }
+  if (!Number.isInteger(p.d) || p.d <= 0) { toast("作业时长 d 必须是正整数"); return null; }
+  if (p.T < t) { toast("截止秒 T 不能早于当前秒 t"); return null; }
+  return p;
+}
+
+async function evaluateWorkzone(silent = false) {
+  if (!state.batch) return;
+  const p = readWorkzoneParams();
+  if (!p) {
+    state.workzone = null;
+    renderWorkzone();
+    return;
+  }
+  const qs = new URLSearchParams({
+    cx: p.cx, cy: p.cy, radius: p.radius,
+    z_lo: p.z_lo, z_hi: p.z_hi, t: p.t, T: p.T, d: p.d,
+  }).toString();
+  try {
+    const d2 = await api(`/api/batches/${state.batch.batch_id}/workzone?${qs}`);
+    state.workzone = d2.workzone;
+    renderWorkzone();
+  } catch (e) {
+    state.workzone = null;
+    renderWorkzone();
+    if (!silent) toast("开工窗口查询被拒绝：" + e.message, 4200);
+  }
+}
+
+function fmtIntIv([a, b]) { return a === b ? `${a}` : `[${a}, ${b}]`; }
+
+function renderWorkzone() {
+  const box = $("wzBox");
+  if (!box) return;
+  if (!state.workzone) { box.innerHTML = ""; return; }
+  const w = state.workzone;
+  const cw = w.candidate_window;
+  const head = w.confirmable
+    ? `<div class="wz-ok">✅ 航迹可确认（无逾期架次）</div>`
+    : `<div class="wz-bad">⚠️ 不可确认：${w.overdue_sorties.map(escapeHtml).join("、")} 已逾期，航迹未知，不提供安全起点</div>`;
+
+  let windowLine;
+  if (!cw.has_candidates) {
+    windowLine = `<div class="wz-note">候选开工秒范围 [${cw.start_lo}, ${cw.start_hi}] 为空（T − d &lt; t），没有候选开工秒。</div>`;
+  } else if (!w.confirmable) {
+    windowLine = `<div class="wz-note">候选开工秒范围为 [${cw.start_lo}, ${cw.start_hi}]，但存在逾期架次，无法给出安全起点。</div>`;
+  } else {
+    const safeTxt = w.safe_start_intervals.length
+      ? w.safe_start_intervals.map(fmtIntIv).join("，")
+      : "（空）";
+    const forbTxt = w.forbidden_start_intervals.length
+      ? w.forbidden_start_intervals.map(fmtIntIv).join("，")
+      : "无";
+    windowLine = `
+      <div class="wz-note">候选开工秒范围：[${cw.start_lo}, ${cw.start_hi}]（作业闭区间 [s, s+${w.duration}] 须在 ${w.T}s 前结束）</div>
+      <div class="${w.earliest_safe_start === null ? "wz-bad" : "wz-ok2"}">
+        最早安全起点：${w.earliest_safe_start === null ? "（空，确无安全起点）" : `<b>${w.earliest_safe_start}</b> s`}
+      </div>
+      <div class="wz-safe">安全整数秒开工起点区间：${safeTxt}</div>
+      <div class="wz-note">被占用排除的开工秒：${forbTxt}</div>`;
+  }
+
+  const occ = w.occupancy.filter((r) => r.occupied_intervals.length)
+    .map((r) => `<div class="wc-line">${escapeHtml(r.sortie_id)}（${statusLabel(r.status)}，起飞 ${r.takeoff_offset ?? "—"}s）：` +
+      r.occupied_intervals.map((iv) => `[${iv.time_start}, ${iv.time_end}]`).join("，") + " s</div>")
+    .join("");
+  const occHtml = occ
+    ? `<div class="wc-title">航迹在圆柱内的连续时间占用（含边界/航点，已裁剪到 [${w.t}, ${w.T}]s）</div>${occ}`
+    : `<div class="wz-note">[${w.t}, ${w.T}]s 内没有架次进入该圆柱。</div>`;
+
+  box.innerHTML = `${head}${windowLine}${occHtml}`;
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -1029,6 +1129,7 @@ $("closeResult").addEventListener("click", () => $("resultPanel").classList.add(
 
 $("createBatchBtn").addEventListener("click", createBatch);
 $("evalWarnBtn").addEventListener("click", evaluateWarning);
+$("evalWzBtn").addEventListener("click", () => evaluateWorkzone());
 $("reviewBtn").addEventListener("click", evaluateReview);
 $("warnT").addEventListener("keydown", (e) => { if (e.key === "Enter") evaluateWarning(); });
 $("batchDel").addEventListener("click", () => {
